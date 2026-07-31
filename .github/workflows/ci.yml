@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  LISP: sbcl
+  LISP: sbcl_static
 
 jobs:
   build:
