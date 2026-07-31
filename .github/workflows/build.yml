@@ -1,0 +1,151 @@
+name: Build CIEL
+
+on:
+  push:
+    branches: [ci]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  LISP: sbcl_static
+
+jobs:
+  ciel-libraries:
+    runs-on: ubuntu-latest
+    env:
+      OS: ubuntu-latest
+    steps:
+      - name: Checkout CIEL
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          # libzstd-dev for SBCL >= 2.2.6's core compression, zlib1g-dev as
+          # a fallback; inotify-tools for CIEL's file-notify feature (see
+          # README "System dependencies"). SBCL itself comes from run.sh
+          # below, not apt.
+          sudo apt-get install -y inotify-tools libzstd-dev zlib1g-dev build-essential atool
+
+      - name: Install SBCL and Quicklisp
+        run: |
+          echo "ARCH=$(uname -m)" >> "${GITHUB_ENV}"
+          bash --version
+          curl https://raw.githubusercontent.com/digikar99/lisp-travis-lite/master/run.sh | bash
+
+      - name: Add the Ultralisp distribution
+        run: cl --eval '(ql-dist:install-dist "http://dist.ultralisp.org/" :prompt nil)' --quit
+
+      - name: Update ASDF
+        run: |
+          cd $HOME/quicklisp/local-projects/
+          git clone --depth 1 --branch 3.3.7.4 https://gitlab.common-lisp.net/asdf/asdf
+
+      - name: Install the libraries
+        run: |
+          pwd
+          ls -l
+          cp -r $HOME/work/CIEL/CIEL $HOME/quicklisp/local-projects/
+          cl --eval '(ql:quickload "ciel")' \
+             --eval '(ql:quickload "ciel/repl")'
+             --quit
+
+      - name: Collect libraries
+        if: runner.os == 'Linux'
+        run: |
+          mkdir ciel-libraries/
+          cp -r $HOME/common-lisp/ql-https ciel-libraries/
+          cp -r $HOME/quicklisp/quicklisp ciel-libraries/
+          mv $HOME/quicklisp/local-projects/* ciel-libraries/
+          mv $HOME/quicklisp/dists/quicklisp/software/* ciel-libraries/
+          mv $HOME/quicklisp/dists/ultralisp/software/* ciel-libraries/
+          ## atool -a ciel-libraries.tar.gz ciel-libraries
+
+      - name: Upload libraries
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciel-libraries
+          path: ciel-libraries
+
+
+  build:
+    needs: ciel-libraries
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - OS: ubuntu-latest
+            shell: bash
+          - OS: macos-latest
+            shell: bash
+          - OS: windows-latest
+            shell: msys2 {0}
+
+    runs-on: ${{ matrix.OS }}
+    env:
+      OS: ${{ matrix.OS }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          # libzstd-dev for SBCL >= 2.2.6's core compression, zlib1g-dev as
+          # a fallback; inotify-tools for CIEL's file-notify feature (see
+          # README "System dependencies"). SBCL itself comes from run.sh
+          # below, not apt.
+          sudo apt-get install -y git inotify-tools libzstd-dev zlib1g-dev build-essential atool
+
+      - name: Set up MSYS2 (Windows)
+        if: matrix.OS == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          install: git curl zip gcc atool libzstd-devel mingw-w64-x86_64-zstd mingw-w64-x86_64-toolchain mingw-w64-x86_64-autotools mingw-w64-x86_64-cmake mingw-w64-x86_64-openssl mingw-w64-x86_64-github-cli
+
+      - name: Install system dependencies (MacOS)
+        if: matrix.OS == 'macos-latest'
+        run: |
+          brew install zstd atool
+
+      - name: Install SBCL and Quicklisp
+        run: |
+          echo "ARCH=$(uname -m)" >> "${GITHUB_ENV}"
+          bash --version
+          curl https://raw.githubusercontent.com/digikar99/lisp-travis-lite/master/run.sh | bash
+
+      - name: Sanity-check the toolchain
+        run: |
+          which cl && cl --eval '(print (lisp-implementation-version))' --quit
+
+      - name: Download ciel-libraries
+        uses: actions/download-artifact@v4
+        with:
+          name: ciel-libraries
+          path: $HOME/quicklisp/local-projects/
+
+      - name: Build the CIEL binary
+        run: |
+          pwd
+          ls -l
+          cp -r $HOME/work/CIEL/CIEL $HOME/quicklisp/local-projects/
+          cl --eval '(ql:quickload "ciel")' \
+             --eval '(ql:quickload "ciel/repl")' \
+             --eval '(asdf:make "ciel/repl")' \
+             --quit
+
+      - name: Smoke test the binary
+        continue-on-error: true
+        run: |
+          mv $HOME/quicklisp/local-projects/CIEL/ciel ./
+          echo '(format t "CIEL build OK~%")' > smoke.lisp
+          ./ciel smoke.lisp
+
+      - name: Upload ciel binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciel-$(uname -s | tr [A-Z] [a-z])-$(uname -m)
+          path: ciel
